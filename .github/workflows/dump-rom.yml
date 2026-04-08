@@ -1,0 +1,168 @@
+# =============================================================================
+# dump-rom.yml — Android ROM Firmware Dumper Pipeline
+#
+# Downloads ROM from Pixeldrain → Extracts with DumprX → Pushes to gitgud.io
+# Trigger: workflow_dispatch (manual) with required inputs
+# Traceability: T-01 (orchestration), T-14 (secrets validation)
+# =============================================================================
+
+name: Dump Android ROM Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      pixeldrain_url:
+        description: 'Pixeldrain file URL (e.g. https://pixeldrain.com/u/PxG66dBX)'
+        required: true
+        type: string
+      device_name:
+        description: 'Device name for repo naming (e.g. pixel8a, redmi13c)'
+        required: true
+        type: string
+      firmware_version:
+        description: 'Firmware version (e.g. 15.0.0, AP3A.240919.001)'
+        required: true
+        type: string
+      pixeldrain_api_key:
+        description: 'Pixeldrain API key (optional, bypasses rate-limits)'
+        required: false
+        type: string
+
+env:
+  WORKSPACE: /tmp/rom-workspace
+  ROM_DIR: /tmp/rom-workspace/rom
+  DUMPRX_DIR: /tmp/rom-workspace/dumprx
+  OUTPUT_DIR: /tmp/rom-workspace/out
+
+permissions:
+  contents: read
+
+jobs:
+  dump-rom:
+    name: Dump Firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # -----------------------------------------------------------------
+      # T-14: Validate secrets and environment
+      # -----------------------------------------------------------------
+      - name: Validate secrets
+        env:
+          GITGUD_TOKEN: ${{ secrets.GITGUD_TOKEN }}
+          GITGUD_GROUP: ${{ secrets.GITGUD_GROUP }}
+        run: |
+          if [[ -z "$GITGUD_TOKEN" ]]; then
+            echo "::error::GITGUD_TOKEN secret is not configured"
+            echo "Go to Settings → Secrets → Actions and add GITGUD_TOKEN"
+            exit 1
+          fi
+          if [[ -z "$GITGUD_GROUP" ]]; then
+            echo "::error::GITGUD_GROUP secret is not configured"
+            echo "Go to Settings → Secrets → Actions and add GITGUD_GROUP"
+            exit 1
+          fi
+          echo "[OK] All required secrets are set"
+
+      # -----------------------------------------------------------------
+      # Checkout scripts
+      # -----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      # -----------------------------------------------------------------
+      # T-02 to T-05: Download ROM from Pixeldrain
+      # -----------------------------------------------------------------
+      - name: Download ROM from Pixeldrain
+        id: download
+        env:
+          PIXELDRAIN_API_KEY: ${{ inputs.pixeldrain_api_key }}
+          GITHUB_OUTPUT: $GITHUB_OUTPUT
+        run: |
+          ./scripts/download-pixeldrain.sh \
+            "${{ inputs.pixeldrain_url }}" \
+            "$ROM_DIR"
+
+      - name: Show download info
+        run: |
+          echo "### Download Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **File** | \`${{ steps.download.outputs.rom_file }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **URL** | ${{ inputs.pixeldrain_url }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      # -----------------------------------------------------------------
+      # T-06: Setup DumprX
+      # -----------------------------------------------------------------
+      - name: Setup DumprX
+        run: |
+          ./scripts/setup-dumprx.sh "$DUMPRX_DIR"
+
+      # -----------------------------------------------------------------
+      # T-07 to T-08, T-15: Dump firmware partitions
+      # -----------------------------------------------------------------
+      - name: Dump firmware
+        id: dump
+        env:
+          GITHUB_OUTPUT: $GITHUB_OUTPUT
+        run: |
+          ./scripts/dump-firmware.sh \
+            "$DUMPRX_DIR" \
+            "${{ steps.download.outputs.rom_file }}" \
+            "$OUTPUT_DIR"
+
+      - name: Show dump info
+        run: |
+          echo "### Extraction Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Device** | \`${{ inputs.device_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Firmware** | \`${{ inputs.firmware_version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Files** | ${{ steps.dump.outputs.dumped_files }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Partitions** | ${{ steps.dump.outputs.partition_images }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      # -----------------------------------------------------------------
+      # Free disk space before push (GitHub runners have ~14GB)
+      # -----------------------------------------------------------------
+      - name: Free disk space
+        run: |
+          echo "[INFO] Disk usage before cleanup:"
+          df -h /tmp | tail -1
+          echo "[INFO] Cleaning up ROM and DumprX to free space..."
+          rm -rf "$ROM_DIR"
+          rm -rf "$DUMPRX_DIR"
+          echo "[INFO] Disk usage after cleanup:"
+          df -h /tmp | tail -1
+
+      # -----------------------------------------------------------------
+      # T-09 to T-12: Push extracted files to gitgud.io
+      # -----------------------------------------------------------------
+      - name: Push to gitgud.io
+        id: push
+        env:
+          GITGUD_TOKEN: ${{ secrets.GITGUD_TOKEN }}
+          GITGUD_GROUP: ${{ secrets.GITGUD_GROUP }}
+          GITGUD_SSH_KEY: ${{ secrets.GITGUD_SSH_KEY }}
+          GITHUB_OUTPUT: $GITHUB_OUTPUT
+        run: |
+          REPO_NAME="firmware-${{ inputs.device_name }}-${{ inputs.firmware_version }}"
+          ./scripts/push-to-gitgud.sh \
+            "$OUTPUT_DIR" \
+            "$REPO_NAME" \
+            "${{ inputs.device_name }}" \
+            "${{ inputs.firmware_version }}"
+
+      # -----------------------------------------------------------------
+      # T-13: Generate final job summary
+      # -----------------------------------------------------------------
+      - name: Generate summary
+        env:
+          GITHUB_STEP_SUMMARY: $GITHUB_STEP_SUMMARY
+        run: |
+          ./scripts/notify-summary.sh \
+            "firmware-${{ inputs.device_name }}-${{ inputs.firmware_version }}" \
+            "${{ steps.dump.outputs.dumped_files }}" \
+            "${{ steps.push.outputs.repo_url }}"
