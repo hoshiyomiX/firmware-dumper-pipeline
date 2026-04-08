@@ -145,6 +145,10 @@ NETRC_EOF
     # Install and initialize Git LFS
     echo "[INFO] Installing Git LFS..."
     git lfs install
+
+    # T-11c: Tune LFS for faster uploads
+    git config lfs.concurrenttransfers 8
+    git config lfs.https://gitgud.io.locksverify true
 }
 
 # =========================================================================
@@ -156,29 +160,25 @@ configure_lfs() {
 
     echo "[INFO] Configuring Git LFS tracking rules..."
 
-    # Track all .img files (partition images are typically large)
+    # T-11a: Only track .img files by extension (these are the large partition images)
+    # Small .bin/.dat/.so files are committed as normal git objects — much faster
     git lfs track "*.img"
 
-    # Track other potentially large binary files
-    git lfs track "*.bin"
-    git lfs track "*.dat"
-    git lfs track "*.br"
-    git lfs track "*.ext4"
-
-    # Track files larger than 100MB specifically
-    find . -maxdepth 2 -type f -size +100M | while IFS= read -r file; do
+    # T-11b: Track any individual file >100MB regardless of extension
+    # This catches outliers without needlessly LFS-tracking small files
+    local lfs_count=0
+    find . -type f -size +100M | while IFS= read -r file; do
         local ext="${file##*.}"
-        local fname
-        fname=$(basename "$file")
-        # Track by specific pattern if not already covered
-        if ! git lfs track | grep -q "\.${ext}"; then
+        # Only add extension-level rule if not already tracked
+        if ! git lfs track | grep -q "\.${ext} filter=lfs"; then
             git lfs track "*.${ext}"
+            lfs_count=$((lfs_count + 1))
+            echo "  [LFS] Added *.${ext} (>100MB file found: ${file})"
         fi
     done
 
-    # Ensure .gitattributes is committed
     echo "[INFO] LFS tracking patterns:"
-    git lfs track | head -20
+    git lfs track
 
     # Add .gitattributes to repo
     git add .gitattributes
