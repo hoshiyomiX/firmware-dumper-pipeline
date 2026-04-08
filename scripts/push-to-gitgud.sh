@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# T-10b: Prevent Git from prompting for credentials in headless CI
+export GIT_TERMINAL_PROMPT=0
+
 OUTPUT_DIR="${1:?Usage: push-to-gitgud.sh <output_dir> <repo_name> <device> <version>}"
 REPO_NAME="${2:?}"
 DEVICE_NAME="${3:?}"
@@ -105,21 +108,38 @@ init_git() {
     git config user.email "firmware-bot@users.noreply.gitgud.io"
     git config http.sslVerify true
 
-    # Setup SSH if key is provided, otherwise use HTTPS+token
+    # Determine owner
+    local owner
+    if [[ -n "${GITGUD_GROUP:-}" ]]; then
+        owner="${GITGUD_GROUP}"
+    else
+        owner=$(curl -sSL -H "Authorization: token ${GITGUD_TOKEN}" "${GITGUD_API}/user" | jq -r '.login')
+    fi
+
+    # Setup SSH if key is provided, otherwise use HTTPS with .netrc
     if [[ -n "${GITGUD_SSH_KEY:-}" ]]; then
         echo "[INFO] Setting up SSH key..."
         mkdir -p ~/.ssh
         echo "${GITGUD_SSH_KEY}" > ~/.ssh/id_ed25519
         chmod 600 ~/.ssh/id_ed25519
         ssh-keyscan -H gitgud.io >> ~/.ssh/known_hosts 2>/dev/null
-        # Convert HTTPS URL to SSH
-        REPO_SSH_URL="git@gitgud.io:${GITGUD_GROUP:-$(curl -sSL -H "Authorization: token ${GITGUD_TOKEN}" "${GITGUD_API}/user" | jq -r '.login')}/${REPO_NAME}.git"
-        git remote add origin "$REPO_SSH_URL"
+        git remote add origin "git@gitgud.io:${owner}/${REPO_NAME}.git"
     else
-        # Use HTTPS with token embedded in URL
-        local owner="${GITGUD_GROUP:-$(curl -sSL -H "Authorization: token ${GITGUD_TOKEN}" "${GITGUD_API}/user" | jq -r '.login')}"
-        local token_url="https://${GITGUD_TOKEN}@gitgud.io/${owner}/${REPO_NAME}.git"
-        git remote add origin "$token_url"
+        # T-10a: Use .netrc for credential storage (works for git + git-lfs)
+        # Gitea accepts token as password with any username
+        echo "[INFO] Configuring .netrc for gitgud.io authentication..."
+        cat > ~/.netrc << NETRC_EOF
+machine gitgud.io
+login token
+password ${GITGUD_TOKEN}
+NETRC_EOF
+        chmod 600 ~/.netrc
+
+        # Tell git to use .netrc for credentials
+        git config --global credential.helper "netrc --file ${HOME}/.netrc"
+
+        # Use clean URL — no token embedded (prevents leaks in logs/processes)
+        git remote add origin "https://gitgud.io/${owner}/${REPO_NAME}.git"
     fi
 
     # Install and initialize Git LFS
@@ -199,6 +219,10 @@ Files: $(find . -type f | wc -l)"
         git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
         git push -u origin main --force 2>&1
     }
+
+    # Cleanup: remove .netrc so token doesn't leak to subsequent steps
+    rm -f ~/.netrc
+    git config --global --unset credential.helper 2>/dev/null || true
 
     echo "[INFO] Push complete!"
 }
