@@ -239,8 +239,12 @@ main() {
         exit 1
     fi
 
-    # Sanitize repo name (Gitea requirements)
-    REPO_NAME=$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')
+    # Sanitize repo name (Gitea requirements):
+    #   - lowercase only
+    #   - replace invalid chars with '-'
+    #   - trim whitespace first
+    #   - strip leading/trailing '.' '_' '-' (Gitea rejects these)
+    REPO_NAME=$(echo "$REPO_NAME" | xargs | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | sed 's/^[._-]*//' | sed 's/[._-]*$//')
     echo "[INFO] Sanitized repo name: ${REPO_NAME}"
 
     # T-09: Create repo
