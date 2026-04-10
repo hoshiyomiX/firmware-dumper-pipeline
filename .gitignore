@@ -14,3 +14,11 @@ Thumbs.db
 *.bin
 *.dat
 *.zip
+
+# Deploy keys
+deploy_key
+deploy_key*
+deploy-keys-doc.json
+
+# Stale nested copy (when developing inside another repo)
+firmware-dumper-pipeline/

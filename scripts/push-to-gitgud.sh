@@ -230,31 +230,23 @@ NETRC_EOF
 
 # =========================================================================
 # T-11: Configure .gitattributes for LFS tracking
-# Files > 100MB MUST use LFS on gitgud.io
+# Strategy: All-files-LFS — every file is stored as an LFS object.
+# LFS objects upload separately via batch API and don't count toward
+# gitgud.io's 4.88 GiB SSH push limit. The git pack only contains
+# ~130-byte pointer files per object plus .gitattributes itself.
 # =========================================================================
 configure_lfs() {
     cd "$OUTPUT_DIR"
 
-    echo "[INFO] Configuring Git LFS tracking rules..."
+    echo "[INFO] Configuring Git LFS tracking (all-files strategy)..."
 
-    # T-11a: Only track .img files by extension (these are the large partition images)
-    # Small .bin/.dat/.so files are committed as normal git objects — much faster
-    git lfs track "*.img"
+    # Track ALL files via LFS using a single wildcard.
+    # This eliminates the need for extension-based detection and ensures
+    # the git pack stays minimal regardless of file types present.
+    # The .gitattributes file itself is excluded by Git automatically.
+    git lfs track "*"
 
-    # T-11b: Track any individual file >100MB regardless of extension
-    # This catches outliers without needlessly LFS-tracking small files
-    local lfs_count=0
-    find . -type f -size +100M | while IFS= read -r file; do
-        local ext="${file##*.}"
-        # Only add extension-level rule if not already tracked
-        if ! git lfs track | grep -q "\.${ext} filter=lfs"; then
-            git lfs track "*.${ext}"
-            lfs_count=$((lfs_count + 1))
-            echo "  [LFS] Added *.${ext} (>100MB file found: ${file})"
-        fi
-    done
-
-    echo "[INFO] LFS tracking patterns:"
+    echo "[INFO] LFS tracking pattern: * (all files)"
     git lfs track
 
     # Add .gitattributes to repo
@@ -278,6 +270,25 @@ commit_and_push() {
         echo "[INFO] No changes to commit (repo may already be up to date)"
         return 0
     fi
+
+    # Pre-push size summary for gitgud.io's 4.883 GiB SSH push limit.
+    # With all-files-LFS, only .gitattributes and pointer stubs go into the
+    # git pack — the limit is effectively irrelevant for firmware dumps.
+    # LFS objects upload separately via batch API and don't count toward this limit.
+
+    local file_count
+    file_count=$(find . -type f ! -path './.git/*' ! -name '.gitattributes' | wc -l)
+    local total_bytes
+    total_bytes=$(find . -type f ! -path './.git/*' -print0 2>/dev/null | \
+        xargs -0 stat -c%s 2>/dev/null | awk '{s+=$1} END {print s+0}')
+    total_bytes="${total_bytes:-0}"
+    local total_gb
+    total_gb=$(python3 -c "print(f'{$total_bytes / 1073741824:.2f}')" 2>/dev/null || \
+               echo "$((total_bytes / 1048576)) MB")
+
+    echo "[INFO] Total output: ${file_count} files, $total_gb GiB ($total_bytes bytes)"
+    echo "[INFO] LFS strategy: all-files (git pack ≈ $((file_count * 130)) bytes + .gitattributes)"
+    echo "[INFO] gitgud.io push limit (4.88 GiB): not a concern with all-files-LFS"
 
     # Create commit
     local commit_msg="Dump firmware for ${DEVICE_NAME} ${FIRMWARE_VERSION}
@@ -320,11 +331,11 @@ main() {
     fi
 
     # Sanitize repo name (Gitea requirements):
-    #   - lowercase only
+    #   - uppercase only
     #   - replace invalid chars with '-'
     #   - trim whitespace first
     #   - strip leading/trailing '.' '_' '-' (Gitea rejects these)
-    REPO_NAME=$(echo "$REPO_NAME" | xargs | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | sed 's/^[._-]*//' | sed 's/[._-]*$//')
+    REPO_NAME=$(echo "$REPO_NAME" | xargs | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9._-]/-/g' | sed 's/^[._-]*//' | sed 's/[._-]*$//')
     echo "[INFO] Sanitized repo name: ${REPO_NAME}"
 
     # T-R4: Create repo (skipped in SSH-only mode if no token)
