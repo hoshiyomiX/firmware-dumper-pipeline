@@ -154,6 +154,22 @@ init_git() {
         mkdir -p ~/.ssh
         echo "${GITGUD_SSH_KEY}" > ~/.ssh/id_ed25519
         chmod 600 ~/.ssh/id_ed25519
+
+        # Convert PKCS#8 format to OpenSSH native format if needed
+        # GitHub Secrets may store keys as -----BEGIN PRIVATE KEY----- (PKCS#8)
+        # but OpenSSH requires -----BEGIN OPENSSH PRIVATE KEY-----
+        if head -1 ~/.ssh/id_ed25519 | grep -q "BEGIN PRIVATE KEY$"; then
+            echo "[INFO] Converting PKCS#8 key to OpenSSH native format..."
+            # Rewrite the key in OpenSSH format (default on ubuntu-latest)
+            # -P "" = current passphrase is empty, -N "" = new passphrase is empty
+            ssh-keygen -p -f ~/.ssh/id_ed25519 -P "" -N "" 2>/dev/null || true
+            # Verify conversion succeeded
+            if ! head -1 ~/.ssh/id_ed25519 | grep -q "OPENSSH"; then
+                echo "::error::Failed to convert SSH key to OpenSSH format"
+                exit 1
+            fi
+        fi
+
         ssh-keyscan -H gitgud.io >> ~/.ssh/known_hosts 2>/dev/null
         git remote add origin "git@gitgud.io:${owner}/${REPO_NAME}.git"
     elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
