@@ -230,23 +230,38 @@ NETRC_EOF
 
 # =========================================================================
 # T-11: Configure .gitattributes for LFS tracking
-# Strategy: All-files-LFS — every file is stored as an LFS object.
-# LFS objects upload separately via batch API and don't count toward
-# gitgud.io's 4.88 GiB SSH push limit. The git pack only contains
-# ~130-byte pointer files per object plus .gitattributes itself.
+# Extension-based strategy — only large files go through LFS.
+# Small files stay in the git pack (zlib+delta compressed over SSH),
+# which is faster than per-object LFS HTTP uploads for small/medium files.
+# LFS objects upload separately and don't count toward the push limit.
 # =========================================================================
 configure_lfs() {
     cd "$OUTPUT_DIR"
 
-    echo "[INFO] Configuring Git LFS tracking (all-files strategy)..."
+    echo "[INFO] Configuring Git LFS tracking rules..."
 
-    # Track ALL files via LFS using a single wildcard.
-    # This eliminates the need for extension-based detection and ensures
-    # the git pack stays minimal regardless of file types present.
-    # The .gitattributes file itself is excluded by Git automatically.
-    git lfs track "*"
+    # Always track .img files (partition images — always large)
+    git lfs track "*.img"
 
-    echo "[INFO] LFS tracking pattern: * (all files)"
+    # Auto-detect large file extensions and track them at extension level.
+    # Only files >100MB trigger extension-level tracking — this keeps small
+    # files (.prop, .txt, .xml, .cfg, .bin, .dat) in the git pack where
+    # zlib + delta compression is more efficient than per-object HTTP uploads.
+    # Using process substitution to avoid subshell variable loss.
+    local lfs_count=0
+    local tracked_exts=""
+    while IFS= read -r file; do
+        local ext="${file##*.}"
+        # Only add extension-level rule if not already tracked
+        if ! echo "$tracked_exts" | grep -q "\.${ext}"; then
+            git lfs track "*.${ext}"
+            lfs_count=$((lfs_count + 1))
+            tracked_exts="${tracked_exts} .${ext}"
+            echo "  [LFS] Added *.${ext} (>100MB file found: ${file})"
+        fi
+    done < <(find . -type f -size +100M)
+
+    echo "[INFO] LFS tracking: *.img (always) + ${lfs_count} auto-detected extensions"
     git lfs track
 
     # Add .gitattributes to repo
@@ -271,13 +286,11 @@ commit_and_push() {
         return 0
     fi
 
-    # Pre-push size summary for gitgud.io's 4.883 GiB SSH push limit.
-    # With all-files-LFS, only .gitattributes and pointer stubs go into the
-    # git pack — the limit is effectively irrelevant for firmware dumps.
+    # Pre-push size estimate for gitgud.io's 4.883 GiB push limit.
+    # The limit applies to the git pack (non-LFS content only).
     # LFS objects upload separately via batch API and don't count toward this limit.
+    # Actual pack size is smaller due to git's zlib compression + delta encoding.
 
-    local file_count
-    file_count=$(find . -type f ! -path './.git/*' ! -name '.gitattributes' | wc -l)
     local total_bytes
     total_bytes=$(find . -type f ! -path './.git/*' -print0 2>/dev/null | \
         xargs -0 stat -c%s 2>/dev/null | awk '{s+=$1} END {print s+0}')
@@ -285,10 +298,45 @@ commit_and_push() {
     local total_gb
     total_gb=$(python3 -c "print(f'{$total_bytes / 1073741824:.2f}')" 2>/dev/null || \
                echo "$((total_bytes / 1048576)) MB")
+    echo "[INFO] Total output: $total_gb GiB ($total_bytes bytes)"
 
-    echo "[INFO] Total output: ${file_count} files, $total_gb GiB ($total_bytes bytes)"
-    echo "[INFO] LFS strategy: all-files (git pack ≈ $((file_count * 130)) bytes + .gitattributes)"
-    echo "[INFO] gitgud.io push limit (4.88 GiB): not a concern with all-files-LFS"
+    # Extract LFS-tracked extensions and measure non-LFS content
+    local lfs_exts
+    lfs_exts=$(git lfs track | sed -n 's/^\*\.\([a-zA-Z0-9_]*\).*/\1/p' | sort -u)
+    local non_lfs_bytes=0
+    if [[ -n "$lfs_exts" ]]; then
+        local ext_regex
+        ext_regex=$(printf '%s\n' "$lfs_exts" | paste -sd'|' -)
+        non_lfs_bytes=$(find . -type f \
+            ! -name '.gitattributes' \
+            ! -regex ".*\\.(${ext_regex})$" \
+            -print0 2>/dev/null | \
+            xargs -0 stat -c%s 2>/dev/null | \
+            awk '{s+=$1} END {print s+0}')
+    else
+        non_lfs_bytes=$(find . -type f \
+            ! -name '.gitattributes' \
+            -print0 2>/dev/null | \
+            xargs -0 stat -c%s 2>/dev/null | \
+            awk '{s+=$1} END {print s+0}')
+    fi
+    non_lfs_bytes="${non_lfs_bytes:-0}"
+
+    local non_lfs_gb
+    non_lfs_gb=$(python3 -c "print(f'{$non_lfs_bytes / 1073741824:.2f}')" 2>/dev/null || \
+                 echo "$((non_lfs_bytes / 1048576)) MB")
+    echo "[INFO] Non-LFS content (git pack estimate): $non_lfs_gb GiB"
+    if [[ -n "$lfs_exts" ]]; then
+        echo "[INFO] LFS-tracked extensions: $(echo "$lfs_exts" | tr '\n' ', ' | sed 's/, $//')"
+    fi
+
+    local MAX_PUSH_BYTES=5242880000  # 4.883 GiB
+    if [[ "$non_lfs_bytes" -gt "$MAX_PUSH_BYTES" ]]; then
+        echo "::warning::Non-LFS content ($non_lfs_gb GiB) may exceed gitgud.io push limit (4.88 GiB)"
+        echo "::warning::Actual pack is smaller due to compression — push will be attempted"
+    elif [[ "$non_lfs_bytes" -gt $((MAX_PUSH_BYTES * 90 / 100)) ]]; then
+        echo "::warning::Non-LFS content ($non_lfs_gb GiB) is close to gitgud.io push limit (4.88 GiB)"
+    fi
 
     # Create commit
     local commit_msg="Dump firmware for ${DEVICE_NAME} ${FIRMWARE_VERSION}

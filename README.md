@@ -15,7 +15,7 @@ Download (Pixeldrain) → DumprX Extract → Git LFS Push to gitgud.io
 |------|-------------|
 | **1. Download** | Fetches the ROM from Pixeldrain (SHA256 verified) via API |
 | **2. Extract** | Runs DumprX to unpack firmware partitions (20+ formats: `payload.bin`, `.ozip`, `.ofp`, `UPDATE.APP`, etc.) |
-| **3. Push** | Creates a repo on gitgud.io, commits extracted files with all-files-LFS, pushes via SSH |
+| **3. Push** | Creates a repo on gitgud.io, commits extracted files with extension-based LFS, pushes via SSH |
 
 > The original ROM archive is **not uploaded** — only the extracted partition images and metadata.
 
@@ -117,14 +117,14 @@ The pipeline prefers SSH key authentication for git operations. When `GITGUD_SSH
 
 ### LFS Strategy
 
-All files are tracked via Git LFS using a single `*` wildcard in `.gitattributes`. This means the git pack only contains ~130-byte pointer stubs per file plus `.gitattributes` itself — keeping the pack tiny regardless of total firmware size. LFS objects upload separately via the batch API and are not subject to gitgud.io's SSH push limit.
+Git LFS tracks files at the **extension level** — `*.img` is always tracked, and any extension with at least one file exceeding 100 MB gets auto-detected and tracked. Small files (`.prop`, `.txt`, `.xml`, `.cfg`, `.bin`, `.dat`) stay in the git pack where zlib + delta compression over SSH is more efficient than per-object LFS HTTP uploads. LFS objects upload separately via the batch API and are not subject to gitgud.io's SSH push limit.
 
 ## Limitations
 
 - **Timeout**: The workflow has a 360-minute timeout. Large firmware dumps with many LFS objects may take 60–90 minutes for the push step alone.
-- **Push size limit**: gitgud.io enforces a **4.883 GiB** maximum git pack size. With the all-files-LFS strategy this is not a concern — only pointer stubs and `.gitattributes` enter the pack.
+- **Push size limit**: gitgud.io enforces a **4.883 GiB** maximum git pack size. The pipeline measures non-LFS content before pushing and warns if the limit may be exceeded. LFS objects do not count toward this limit.
 - **Disk space**: GitHub Actions runners have ~14 GB free. Very large firmware packages may require cleanup steps between stages.
-- **Git LFS**: Ensure your gitgud.io account has sufficient LFS storage. All extracted files are tracked via LFS.
+- **Git LFS**: Ensure your gitgud.io account has sufficient LFS storage. Files exceeding 100 MB (by extension) are tracked via LFS.
 - **Format support**: If DumprX doesn't support a particular firmware format, extraction will fail. Check the [DumprX README](https://github.com/DumprX/DumprX) for the full list.
 - **Split super images in OTA**: Split super images as part of OTA/payload extraction may not work in all cases.
 
