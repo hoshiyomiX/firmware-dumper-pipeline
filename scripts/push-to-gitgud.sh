@@ -160,14 +160,20 @@ init_git() {
         # but OpenSSH requires -----BEGIN OPENSSH PRIVATE KEY-----
         if head -1 ~/.ssh/id_ed25519 | grep -q "BEGIN PRIVATE KEY$"; then
             echo "[INFO] Converting PKCS#8 key to OpenSSH native format..."
-            # Rewrite the key in OpenSSH format (default on ubuntu-latest)
-            # -P "" = current passphrase is empty, -N "" = new passphrase is empty
-            ssh-keygen -p -f ~/.ssh/id_ed25519 -P "" -N "" 2>/dev/null || true
-            # Verify conversion succeeded
+            # ssh-keygen -p modifies the key in-place, converting to the
+            # default OpenSSH native format on ubuntu-latest runners
+            ssh-keygen -p -f ~/.ssh/id_ed25519 -P "" -N "" 2>&1 || {
+                echo "::error::Failed to convert SSH key from PKCS#8 to OpenSSH format."
+                echo "::error::Generate a new key with: ssh-keygen -t ed25519 -f deploy_key -N ''"
+                exit 1
+            }
+            # Verify the file now uses OpenSSH native format
             if ! head -1 ~/.ssh/id_ed25519 | grep -q "OPENSSH"; then
-                echo "::error::Failed to convert SSH key to OpenSSH format"
+                echo "::error::Key conversion produced unexpected format."
+                head -1 ~/.ssh/id_ed25519
                 exit 1
             fi
+            echo "[INFO] Key converted successfully"
         fi
 
         ssh-keyscan -H gitgud.io >> ~/.ssh/known_hosts 2>/dev/null
