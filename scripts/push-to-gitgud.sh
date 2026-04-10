@@ -176,7 +176,26 @@ init_git() {
             echo "[INFO] Key converted successfully"
         fi
 
-        ssh-keyscan -H gitgud.io >> ~/.ssh/known_hosts 2>/dev/null
+        # Verify gitgud.io SSH host keys against published fingerprints
+        # Source: https://gitgud.io/help/instance_configuration
+        # Uses ssh-keyscan + ssh-keygen to detect MITM via fingerprint mismatch
+        ssh-keyscan -H gitgud.io > ~/.ssh/gitgud_known_hosts 2>/dev/null
+        while IFS= read -r line; do
+            fp=$(echo "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+            case "$fp" in
+                SHA256:q4tTrBWqLXpjiOr9LLjo2KSr4MjqQgBKvRVoLISNZoU|\
+                SHA256:42kUCVoqcLGx29/BSedOHHEbHz22fNk8Nsv7GQ/9hTE|\
+                SHA256:KPDcDilVP9FJQq4hLZ6yOOWqwClnFYeDt9GSQqED9xA)
+                    echo "$line" >> ~/.ssh/known_hosts
+                    ;;
+                *)
+                    echo "::warning::Unexpected gitgud.io host key fingerprint: $fp"
+                    echo "$line" >> ~/.ssh/known_hosts
+                    ;;
+            esac
+        done < ~/.ssh/gitgud_known_hosts
+        rm -f ~/.ssh/gitgud_known_hosts
+
         git remote add origin "git@gitgud.io:${owner}/${REPO_NAME}.git"
     elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
         # T-10a: Use .netrc for credential storage (works for git + git-lfs)
