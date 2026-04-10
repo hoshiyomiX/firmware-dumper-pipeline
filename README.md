@@ -56,9 +56,12 @@ Go to your repository **Settings → Secrets and variables → Actions** and add
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `GITGUD_TOKEN` | Yes | gitgud.io personal access token |
+| `GITGUD_SSH_KEY` | No* | ED25519 private SSH key for gitgud.io (recommended, primary auth) |
+| `GITGUD_TOKEN` | No* | gitgud.io personal access token (fallback auth; also used for API repo creation) |
 | `GITGUD_GROUP` | Yes | gitgud.io group/organization name (e.g. `my-dumps`) |
-| `GITGUD_SSH_KEY` | No | Private SSH key for gitgud.io (uses HTTPS+token if not set) |
+
+> *At least one of `GITGUD_SSH_KEY` or `GITGUD_TOKEN` is required. If both are set, SSH key is used for git push and the token is used for API repo creation.
+> **SSH-only mode** (no token): git push works, but repo must be created manually on gitgud.io beforehand.
 
 ### 4. Pixeldrain API Key (Optional)
 
@@ -122,5 +125,7 @@ scripts/
 | "SHA256 checksum mismatch" | The download was corrupted — re-run the workflow |
 | "Rate limit / captcha" | Provide a Pixeldrain API key in the workflow input |
 | "DumprX output directory is empty" | The firmware format may not be supported — check the logs |
-| "Push failed" | Verify your `GITGUD_TOKEN` is valid and has sufficient permissions |
+| "Push failed" | Verify your `GITGUD_SSH_KEY` or `GITGUD_TOKEN` is valid |
+| "No authentication configured" | Add at least one of `GITGUD_SSH_KEY` or `GITGUD_TOKEN` in GitHub Secrets |
+| "Repository must already exist" | In SSH-only mode (no token), create the repo on gitgud.io manually before running |
 | "LFS upload failed" | Check gitgud.io LFS storage limits |

@@ -45,16 +45,21 @@ jobs:
 
     steps:
       # -----------------------------------------------------------------
-      # T-14: Validate secrets and environment
+      # T-14 / T-R1: Validate secrets and determine auth mode
+      #   SSH key (primary) → GITGUD_SSH_KEY set  → git push via SSH
+      #   Token (fallback)  → GITGUD_TOKEN set    → git push via HTTPS
+      #   At least one must be present. GITGUD_GROUP is always required.
       # -----------------------------------------------------------------
       - name: Validate secrets
+        id: auth
         env:
+          GITGUD_SSH_KEY: ${{ secrets.GITGUD_SSH_KEY }}
           GITGUD_TOKEN: ${{ secrets.GITGUD_TOKEN }}
           GITGUD_GROUP: ${{ secrets.GITGUD_GROUP }}
         run: |
-          if [[ -z "$GITGUD_TOKEN" ]]; then
-            echo "::error::GITGUD_TOKEN secret is not configured"
-            echo "Go to Settings → Secrets → Actions and add GITGUD_TOKEN"
+          if [[ -z "$GITGUD_SSH_KEY" && -z "$GITGUD_TOKEN" ]]; then
+            echo "::error::No authentication method configured"
+            echo "Add GITGUD_SSH_KEY (recommended) or GITGUD_TOKEN in Settings → Secrets → Actions"
             exit 1
           fi
           if [[ -z "$GITGUD_GROUP" ]]; then
@@ -62,7 +67,13 @@ jobs:
             echo "Go to Settings → Secrets → Actions and add GITGUD_GROUP"
             exit 1
           fi
-          echo "[OK] All required secrets are set"
+          if [[ -n "$GITGUD_SSH_KEY" ]]; then
+            echo "auth_mode=ssh" >> "$GITHUB_OUTPUT"
+            echo "[OK] Auth: SSH key (primary)"
+          else
+            echo "auth_mode=token" >> "$GITHUB_OUTPUT"
+            echo "[OK] Auth: HTTPS token (fallback)"
+          fi
 
       # -----------------------------------------------------------------
       # Checkout scripts
@@ -138,7 +149,9 @@ jobs:
           df -h /tmp | tail -1
 
       # -----------------------------------------------------------------
-      # T-09 to T-12: Push extracted files to gitgud.io
+      # T-09 to T-12 / T-R3-R6: Push extracted files to gitgud.io
+      #   SSH key (primary): push via git@gitgud.io, skip API repo creation if no token
+      #   Token (fallback):  push via HTTPS, create repo via API
       # -----------------------------------------------------------------
       - name: Push to gitgud.io
         id: push
@@ -146,6 +159,7 @@ jobs:
           GITGUD_TOKEN: ${{ secrets.GITGUD_TOKEN }}
           GITGUD_GROUP: ${{ secrets.GITGUD_GROUP }}
           GITGUD_SSH_KEY: ${{ secrets.GITGUD_SSH_KEY }}
+          AUTH_MODE: ${{ steps.auth.outputs.auth_mode }}
           GITHUB_OUTPUT: $GITHUB_OUTPUT
         run: |
           REPO_NAME="firmware-${{ inputs.device_name }}-${{ inputs.firmware_version }}"

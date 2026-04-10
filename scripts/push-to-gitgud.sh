@@ -4,9 +4,14 @@
 # Creates a repo on gitgud.io (Gitea), initializes Git + LFS, and pushes
 # all extracted firmware files.
 #
+# Auth modes (determined by available secrets):
+#   SSH (primary):  GITGUD_SSH_KEY set → push via git@gitgud.io
+#                   GITGUD_TOKEN optional → used for API repo creation if set
+#   HTTPS (fallback): GITGUD_TOKEN set → push via HTTPS + .netrc
+#
 # Usage: push-to-gitgud.sh <output_dir> <repo_name> <device_name> <firmware_version>
-# Traceability: T-09, T-10, T-11, T-12
-# Environment: GITGUD_TOKEN, GITGUD_GROUP, GITGUD_SSH_KEY
+# Traceability: T-09, T-10, T-11, T-12, T-R3, T-R4, T-R5, T-R6
+# Environment: GITGUD_TOKEN (optional), GITGUD_GROUP (required), GITGUD_SSH_KEY (optional)
 # =============================================================================
 
 set -euo pipefail
@@ -20,17 +25,40 @@ DEVICE_NAME="${3:?}"
 FIRMWARE_VERSION="${4:?}"
 GITGUD_API="https://gitgud.io/api/v1"
 
-# Validate required environment variables
-if [[ -z "${GITGUD_TOKEN:-}" ]]; then
-    echo "::error::GITGUD_TOKEN secret is not set. Add it in GitHub Secrets."
+# T-R3: Determine auth mode — at least one method must be available
+if [[ -n "${GITGUD_SSH_KEY:-}" ]]; then
+    AUTH_MODE="ssh"
+    echo "[INFO] Auth mode: SSH key (primary)"
+elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
+    AUTH_MODE="token"
+    echo "[INFO] Auth mode: HTTPS token (fallback)"
+else
+    echo "::error::No authentication configured. Set GITGUD_SSH_KEY or GITGUD_TOKEN."
     exit 1
 fi
 
+# Track whether .netrc was created (for cleanup)
+NETRC_CREATED=false
+
 # =========================================================================
-# T-09: Create gitgud.io repo via Gitea API (reuse if exists)
+# T-R4: Create gitgud.io repo via Gitea API (only if token is available)
+#   Without a token, the repo must pre-exist on gitgud.io.
+#   With SSH-only mode, the push itself will fail if the repo is missing.
 # =========================================================================
 create_repo() {
     local repo_slug="$1"
+
+    # Skip API repo creation if no token is available (SSH-only mode)
+    if [[ -z "${GITGUD_TOKEN:-}" ]]; then
+        local group="${GITGUD_GROUP:?GITGUD_GROUP is required for SSH-only mode}"
+        echo "[INFO] No GITGUD_TOKEN set — skipping API repo creation"
+        echo "[INFO] Target owner: ${group}"
+        echo "[INFO] Repo name: ${repo_slug}"
+        echo "[WARN] Repository must already exist on gitgud.io or push will fail"
+        REPO_URL="https://gitgud.io/${group}/${repo_slug}.git"
+        return 0
+    fi
+
     local group="${GITGUD_GROUP:-}"
     local owner="${group:-$(curl -sSL -H "Authorization: token ${GITGUD_TOKEN}" "${GITGUD_API}/user" | jq -r '.login')}"
 
@@ -95,7 +123,8 @@ create_repo() {
 }
 
 # =========================================================================
-# T-10: Initialize Git + Git LFS in output directory
+# T-10 / T-R5: Initialize Git + Git LFS in output directory
+#   SSH key takes priority; falls back to HTTPS + .netrc
 # =========================================================================
 init_git() {
     local repo_url="$1"
@@ -112,11 +141,14 @@ init_git() {
     local owner
     if [[ -n "${GITGUD_GROUP:-}" ]]; then
         owner="${GITGUD_GROUP}"
-    else
+    elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
         owner=$(curl -sSL -H "Authorization: token ${GITGUD_TOKEN}" "${GITGUD_API}/user" | jq -r '.login')
+    else
+        echo "::error::Cannot determine repo owner — GITGUD_GROUP or GITGUD_TOKEN is required"
+        exit 1
     fi
 
-    # Setup SSH if key is provided, otherwise use HTTPS with .netrc
+    # T-R5: SSH key takes priority over HTTPS
     if [[ -n "${GITGUD_SSH_KEY:-}" ]]; then
         echo "[INFO] Setting up SSH key..."
         mkdir -p ~/.ssh
@@ -124,7 +156,7 @@ init_git() {
         chmod 600 ~/.ssh/id_ed25519
         ssh-keyscan -H gitgud.io >> ~/.ssh/known_hosts 2>/dev/null
         git remote add origin "git@gitgud.io:${owner}/${REPO_NAME}.git"
-    else
+    elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
         # T-10a: Use .netrc for credential storage (works for git + git-lfs)
         # Gitea accepts token as password with any username
         echo "[INFO] Configuring .netrc for gitgud.io authentication..."
@@ -137,9 +169,13 @@ NETRC_EOF
 
         # Tell git to use .netrc for credentials
         git config --global credential.helper "netrc --file ${HOME}/.netrc"
+        NETRC_CREATED=true
 
         # Use clean URL — no token embedded (prevents leaks in logs/processes)
         git remote add origin "https://gitgud.io/${owner}/${REPO_NAME}.git"
+    else
+        echo "::error::No authentication available for git push"
+        exit 1
     fi
 
     # Install and initialize Git LFS
@@ -185,7 +221,8 @@ configure_lfs() {
 }
 
 # =========================================================================
-# T-12: Git commit all extracted files + push to gitgud.io
+# T-12 / T-R6: Git commit all extracted files + push to gitgud.io
+# Cleanup: only remove .netrc when it was actually created
 # =========================================================================
 commit_and_push() {
     cd "$OUTPUT_DIR"
@@ -220,9 +257,11 @@ Files: $(find . -type f | wc -l)"
         git push -u origin main --force 2>&1
     }
 
-    # Cleanup: remove .netrc so token doesn't leak to subsequent steps
-    rm -f ~/.netrc
-    git config --global --unset credential.helper 2>/dev/null || true
+    # T-R6: Cleanup .netrc only if it was created in this session
+    if [[ "$NETRC_CREATED" == "true" ]]; then
+        rm -f ~/.netrc
+        git config --global --unset credential.helper 2>/dev/null || true
+    fi
 
     echo "[INFO] Push complete!"
 }
@@ -247,10 +286,10 @@ main() {
     REPO_NAME=$(echo "$REPO_NAME" | xargs | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | sed 's/^[._-]*//' | sed 's/[._-]*$//')
     echo "[INFO] Sanitized repo name: ${REPO_NAME}"
 
-    # T-09: Create repo
+    # T-R4: Create repo (skipped in SSH-only mode if no token)
     create_repo "$REPO_NAME"
 
-    # T-10: Initialize git
+    # T-R5: Initialize git
     init_git "$REPO_URL"
 
     # T-11: Configure LFS
