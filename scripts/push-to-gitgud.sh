@@ -196,6 +196,24 @@ init_git() {
         done < ~/.ssh/gitgud_known_hosts
         rm -f ~/.ssh/gitgud_known_hosts
 
+        # SSH keepalive — prevents idle disconnect during LFS pre-push hook.
+        # git push over SSH runs the LFS pre-push hook which uploads objects
+        # via HTTPS while the SSH channel sits idle. Without keepalives,
+        # the SSH server or intermediate network device kills the connection
+        # ("client_loop: send disconnect: Broken pipe"), causing git push
+        # to hang indefinitely inside the hook — the || retry block never
+        # triggers because git is still waiting for the hook to finish.
+        # ServerAliveInterval=60: send keepalive every 60s
+        # ServerAliveCountMax=10: disconnect after 10 missed replies (600s)
+        cat > ~/.ssh/config << SSHCFG_EOF
+Host gitgud.io
+    ServerAliveInterval 60
+    ServerAliveCountMax 10
+    TCPKeepAlive yes
+SSHCFG_EOF
+        chmod 600 ~/.ssh/config
+        echo "[INFO] SSH keepalive configured (ServerAliveInterval=60)"
+
         git remote add origin "git@gitgud.io:${owner}/${REPO_NAME}.git"
     elif [[ -n "${GITGUD_TOKEN:-}" ]]; then
         # T-10a: Use .netrc for credential storage (works for git + git-lfs)
@@ -350,12 +368,33 @@ Files: $(find . -type f | wc -l)"
     git commit -m "$commit_msg"
 
     # Push to remote
-    echo "[INFO] Pushing to gitgud.io..."
-    git push -u origin main --force 2>&1 || {
-        echo "[WARN] Push failed, attempting with pull --rebase first..."
-        git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
-        git push -u origin main --force 2>&1
-    }
+    # Strategy: upload LFS objects FIRST via HTTPS, then push git pack over SSH.
+    # This avoids the root cause of "client_loop: send disconnect: Broken pipe"
+    # where the SSH channel dies during the LFS pre-push hook (which uploads
+    # via HTTPS), leaving git push hung inside the hook with no error detection.
+    # By uploading LFS separately, the git push --no-verify only sends the
+    # small git pack (no pre-push hook to block on).
+
+    if [[ "$AUTH_MODE" == "ssh" ]]; then
+        echo "[INFO] Uploading LFS objects via HTTPS (pre-push)..."
+        git lfs push --all origin main 2>&1 || {
+            echo "[WARN] LFS upload failed, will retry with git push..."
+        }
+        echo "[INFO] Pushing git pack via SSH (--no-verify, LFS already uploaded)..."
+        git push --no-verify -u origin main --force 2>&1 || {
+            echo "[WARN] Push failed, attempting with pull --rebase first..."
+            git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
+            git push --no-verify -u origin main --force 2>&1
+        }
+    else
+        # HTTPS mode: standard push with pre-push hook (no SSH idle timeout risk)
+        echo "[INFO] Pushing to gitgud.io..."
+        git push -u origin main --force 2>&1 || {
+            echo "[WARN] Push failed, attempting with pull --rebase first..."
+            git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
+            git push -u origin main --force 2>&1
+        }
+    fi
 
     # T-R6: Cleanup .netrc only if it was created in this session
     if [[ "$NETRC_CREATED" == "true" ]]; then
