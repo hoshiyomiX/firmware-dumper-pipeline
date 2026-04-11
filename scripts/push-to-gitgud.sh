@@ -368,33 +368,17 @@ Files: $(find . -type f | wc -l)"
     git commit -m "$commit_msg"
 
     # Push to remote
-    # Strategy: upload LFS objects FIRST via HTTPS, then push git pack over SSH.
-    # This avoids the root cause of "client_loop: send disconnect: Broken pipe"
-    # where the SSH channel dies during the LFS pre-push hook (which uploads
-    # via HTTPS), leaving git push hung inside the hook with no error detection.
-    # By uploading LFS separately, the git push --no-verify only sends the
-    # small git pack (no pre-push hook to block on).
-
-    if [[ "$AUTH_MODE" == "ssh" ]]; then
-        echo "[INFO] Uploading LFS objects via HTTPS (pre-push)..."
-        git lfs push --all origin main 2>&1 || {
-            echo "[WARN] LFS upload failed, will retry with git push..."
-        }
-        echo "[INFO] Pushing git pack via SSH (--no-verify, LFS already uploaded)..."
-        git push --no-verify -u origin main --force 2>&1 || {
-            echo "[WARN] Push failed, attempting with pull --rebase first..."
-            git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
-            git push --no-verify -u origin main --force 2>&1
-        }
-    else
-        # HTTPS mode: standard push with pre-push hook (no SSH idle timeout risk)
-        echo "[INFO] Pushing to gitgud.io..."
-        git push -u origin main --force 2>&1 || {
-            echo "[WARN] Push failed, attempting with pull --rebase first..."
-            git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
-            git push -u origin main --force 2>&1
-        }
-    fi
+    # Single git push with LFS pre-push hook — matches Run #8 strategy (78 min, 5 MB/s).
+    # The SSH keepalive (ServerAliveInterval=60) prevents idle disconnect during the
+    # LFS pre-push hook, so the split push workaround is no longer needed.
+    # Using one connection instead of two avoids the object discovery overhead
+    # and dual SSH handshake that caused Run #14 to run ~30 min slower than Run #8.
+    echo "[INFO] Pushing to gitgud.io..."
+    git push -u origin main --force 2>&1 || {
+        echo "[WARN] Push failed, attempting with pull --rebase first..."
+        git pull origin main --rebase --allow-unrelated-histories 2>/dev/null || true
+        git push -u origin main --force 2>&1
+    }
 
     # T-R6: Cleanup .netrc only if it was created in this session
     if [[ "$NETRC_CREATED" == "true" ]]; then
