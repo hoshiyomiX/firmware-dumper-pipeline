@@ -119,14 +119,9 @@ The pipeline prefers SSH key authentication for git operations. When `GITGUD_SSH
 
 Git LFS tracks files at the **extension level** — `*.img` is always tracked, and any extension with at least one file exceeding 100 MB gets auto-detected and tracked. Small files (`.prop`, `.txt`, `.xml`, `.cfg`, `.bin`, `.dat`) stay in the git pack where zlib + delta compression over SSH is more efficient than per-object LFS HTTP uploads. LFS objects upload separately via the batch API and are not subject to gitgud.io's SSH push limit.
 
-### SSH Keepalive + Split LFS Push
+### SSH Keepalive
 
-In SSH mode, the pipeline uses a two-phase push strategy to prevent the `"client_loop: send disconnect: Broken pipe"` error that occurs when the SSH channel goes idle during LFS pre-push hook uploads:
-
-1. **Phase 1**: `git lfs push --all origin main` — uploads all LFS objects via HTTPS (no SSH involved)
-2. **Phase 2**: `git push --no-verify` — sends only the small git pack over SSH (pre-push hook skipped since LFS is already uploaded)
-
-Additionally, SSH keepalive packets (`ServerAliveInterval=60`) are configured to prevent intermediate network devices from killing idle connections.
+During `git push`, the LFS pre-push hook uploads objects while the SSH channel sits idle. Without keepalive packets, the SSH server or an intermediate network device may kill the idle connection, causing a `"client_loop: send disconnect: Broken pipe"` error. The pipeline configures SSH keepalive (`ServerAliveInterval=60`, `ServerAliveCountMax=10`, `TCPKeepAlive=yes`) to prevent this.
 
 ## Limitations
 
@@ -146,7 +141,7 @@ Additionally, SSH keepalive packets (`ServerAliveInterval=60`) are configured to
 | `Rate limit / captcha` | Provide a Pixeldrain API key in the workflow input |
 | `DumprX output directory is empty` | The firmware format may not be supported — check the logs |
 | `Push failed` | Verify your `GITGUD_SSH_KEY` or `GITGUD_TOKEN` is valid |
-| `client_loop: send disconnect: Broken pipe` | SSH idle timeout during LFS upload — the split push strategy + keepalive should prevent this |
+| `client_loop: send disconnect: Broken pipe` | SSH idle timeout during LFS upload — keepalive packets (`ServerAliveInterval=60`) should prevent this |
 | `No authentication configured` | Add at least one of `GITGUD_SSH_KEY` or `GITGUD_TOKEN` in GitHub Secrets |
 | `Repository must already exist` | In SSH-only mode (no token), create the repo on gitgud.io manually first |
 | `LFS upload failed` | Check gitgud.io LFS storage limits |
