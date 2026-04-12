@@ -368,11 +368,11 @@ Files: $(find . -type f | wc -l)"
     git commit -m "$commit_msg"
 
     # Push to remote
-    # Single git push with LFS pre-push hook — matches Run #8 strategy (78 min, 5 MB/s).
-    # The SSH keepalive (ServerAliveInterval=60) prevents idle disconnect during the
-    # LFS pre-push hook, so the split push workaround is no longer needed.
-    # Using one connection instead of two avoids the object discovery overhead
-    # and dual SSH handshake that caused Run #14 to run ~30 min slower than Run #8.
+    # Single git push with LFS pre-push hook. SSH keepalive (ServerAliveInterval=60)
+    # is the sole defense against broken pipe — split push workaround is unnecessary.
+    # Single push chosen for code simplicity; A/B testing (Runs #14–#16) showed split vs
+    # single push differs by ~5–10 min, which is within gitgud.io's ±25% server-side
+    # bandwidth variance (~4 MB/s baseline). Run #8's 5 MB/s was a lucky outlier.
     echo "[INFO] Pushing to gitgud.io..."
     git push -u origin main --force 2>&1 || {
         echo "[WARN] Push failed, attempting with pull --rebase first..."
